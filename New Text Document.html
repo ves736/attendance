@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Attendance Processor</title>
+    <style>
+        table {
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        th, td {
+            border: 1px solid black;
+            padding: 8px;
+            text-align: center;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        h4 {
+            margin-top: 30px;
+        }
+        .late {
+            background-color: yellow;
+        }
+        .no-out {
+            background-color: #ffcccb; /* Light red */
+        }
+        .missing-punches {
+            background-color: lightblue;
+        }
+        .leave {
+            background-color: red;
+            color: white;
+        }
+        .overtime {
+            background-color: lightgreen;
+            color: black;
+        }
+        .sunday {
+            background-color: #e6ffe6; /* Light green for Sundays */
+        }
+    </style>
+</head>
+<body>
+    <h2>Attendance Processor</h2>
+    <input type="file" id="excelFile" accept=".xlsx, .xls">
+    <button onclick="processFile()">Process Attendance</button>
+    <button id="downloadBtn" style="display: none;" onclick="downloadExcel()">Download as Excel</button>
+    <div id="result"></div>
+
+    <!-- Include SheetJS library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <!-- Include ExcelJS library for formatting -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+    
+    <script>
+        let globalSummary = null;
+        let dateRange = { minDate: null, maxDate: null }; // To store the date range for the summary heading
+
+        function processFile() {
+            const fileInput = document.getElementById('excelFile');
+            const file = fileInput.files[0];
+            const reader = new FileReader();
+
+            reader.onload = function(e) {
+                const data = new Uint8Array(e.target.result);
+                const workbook = XLSX.read(data, {type: 'array', cellDates: true, raw: false});
+                const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+
+                const rawData = XLSX.utils.sheet_to_json(firstSheet, {header: 1});
+                console.log("Raw Data (first 5 rows):", rawData.slice(0, 5));
+
+                const headers = rawData[1];
+                const dataRows = rawData.slice(2);
+
+                const jsonData = dataRows.map(row => {
+                    const rowData = {};
+                    headers.forEach((header, index) => {
+                        rowData[header] = row[index];
+                    });
+                    return rowData;
+                });
+
+                console.log("Column Names:", Object.keys(jsonData[0] || {}));
+                console.log("Sample Data (first 5 rows):", jsonData.slice(0, 5));
+
+                const attendanceSummary = processAttendance(jsonData);
+                console.log("Final Summary:", attendanceSummary);
+                globalSummary = attendanceSummary;
+                displayResults(attendanceSummary);
+                document.getElementById('downloadBtn').style.display = 'inline';
+            };
+
+            reader.readAsArrayBuffer(file);
+        }
+
+        function formatTime(date) {
+            if (!date || isNaN(date.getTime())) return 'Missing';
+            const hours = String(date.getHours()).padStart(2, '0');
+            const minutes = String(date.getMinutes()).padStart(2, '0');
+            return `${hours}:${minutes}`;
+        }
+
+        function formatDate(dateStr) {
+            const date = new Date(dateStr);
+            const day = String(date.getDate()).padStart(2, '0');
+            const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            const month = monthNames[date.getMonth()];
+            const year = date.getFullYear();
+            return `${day}-${month}-${year}`;
+        }
+
+        function getDayOfWeek(dateStr) {
+            const date = new Date(dateStr);
+            const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            return days[date.getDay()];
+        }
+
+        function getMonthName(monthIndex) {
+            const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+            return months[monthIndex];
+        }
+
+        function processAttendance(data) {
+            const summary = {};
+            const punchInTime = new Date('2025-01-01 08:00:00');
+            const lateThreshold = new Date('2025-01-01 08:06:00');
+            const halfDayThreshold = new Date('2025-01-01 08:10:00');
+            const eveningPunchThreshold = new Date('2025-01-01 17:55:00');
+            const breakfastOutStart = new Date('2025-01-01 09:00:00');
+            const breakfastOutEnd = new Date('2025-01-01 10:30:00');
+            const breakfastInStart = new Date('2025-01-01 9:15:00');
+            const breakfastInEnd = new Date('2025-01-01 11:00:00');
+            const lunchOutStart = new Date('2025-01-01 12:30:00');
+            const lunchOutEnd = new Date('2025-01-01 14:00:00');
+            const lunchInStart = new Date('2025-01-01 13:00:00');
+            const lunchInEnd = new Date('2025-01-01 14:30:00');
+            const duplicateThreshold = 5 * 60 * 1000;
+
+            const groupedData = {};
+            const employeeDateRanges = {};
+
+            const chunkSize = 1000;
+            for (let i = 0; i < data.length; i += chunkSize) {
+                const chunk = data.slice(i, i + chunkSize);
+                chunk.forEach((row, index) => {
+                    const globalIndex = i + index + 1;
+                    const empId = row['Employee ID'] || 'Unknown';
+                    const empName = row['First Name'] || 'Unknown';
+                    const dateStr = row['Date'];
+                    const timeStr = row['Time'];
+                    const punchState = row['Punch State'];
+
+                    if (globalIndex <= 100) {
+                        console.log(`Row ${globalIndex}:`, { empId, empName, dateStr, timeStr, punchState });
+                    }
+
+                    if (!empId || empId === 'Unknown') {
+                        console.log(`Skipping Row ${globalIndex}: Missing Employee ID`);
+                        return;
+                    }
+                    if (!dateStr) {
+                        console.log(`Skipping Row ${globalIndex}: Missing Date`);
+                        return;
+                    }
+                    if (!timeStr) {
+                        console.log(`Skipping Row ${globalIndex}: Missing Time`);
+                        return;
+                    }
+                    if (!punchState) {
+                        console.log(`Skipping Row ${globalIndex}: Missing Punch State`);
+                        return;
+                    }
+
+                    let date;
+                    if (typeof dateStr === 'string') {
+                        date = new Date(dateStr);
+                    } else if (typeof dateStr === 'number') {
+                        date = new Date((dateStr - 25569) * 86400 * 1000);
+                    } else {
+                        console.log(`Skipping Row ${globalIndex}: Invalid date for EMP ID ${empId}: ${dateStr}`);
+                        return;
+                    }
+
+                    if (isNaN(date.getTime())) {
+                        console.log(`Skipping Row ${globalIndex}: Invalid date format for EMP ID ${empId}: ${dateStr}`);
+                        return;
+                    }
+
+                    // Update global date range
+                    if (!dateRange.minDate || date < dateRange.minDate) {
+                        dateRange.minDate = new Date(date);
+                    }
+                    if (!dateRange.maxDate || date > dateRange.maxDate) {
+                        dateRange.maxDate = new Date(date);
+                    }
+
+                    let punchTime;
+                    try {
+                        const timeWithSeconds = `${timeStr}:00`;
+                        punchTime = new Date(`${date.toISOString().split('T')[0]} ${timeWithSeconds}`);
+                        if (isNaN(punchTime.getTime())) {
+                            console.log(`Skipping Row ${globalIndex}: Invalid time for EMP ID ${empId}: ${timeStr}`);
+                            return;
+                        }
+                    } catch (e) {
+                        console.log(`Skipping Row ${globalIndex}: Error parsing time for EMP ID ${empId}: ${timeStr}`, e);
+                        return;
+                    }
+
+                    if (!groupedData[empId]) {
+                        groupedData[empId] = {};
+                    }
+                    const dateKey = date.toISOString().split('T')[0];
+                    if (!groupedData[empId][dateKey]) {
+                        groupedData[empId][dateKey] = { punches: [], name: empName };
+                    }
+
+                    const normalizedPunchState = punchState.trim() === 'Check In' ? 'IN' : punchState.trim() === 'Check Out' ? 'OUT' : punchState;
+                    if (globalIndex <= 100) {
+                        console.log(`Row ${globalIndex}: Normalized Punch State: ${punchState} -> ${normalizedPunchState}`);
+                    }
+                    groupedData[empId][dateKey].punches.push({ time: punchTime, state: normalizedPunchState });
+
+                    if (!employeeDateRanges[empId]) {
+                        employeeDateRanges[empId] = { minDate: date, maxDate: date, name: empName };
+                    } else {
+                        if (date < employeeDateRanges[empId].minDate) {
+                            employeeDateRanges[empId].minDate = date;
+                        }
+                        if (date > employeeDateRanges[empId].maxDate) {
+                            employeeDateRanges[empId].maxDate = date;
+                        }
+                    }
+                });
+            }
+
+            console.log("Grouped Data (sample):", Object.keys(groupedData).slice(0, 5).reduce((acc, empId) => {
+                acc[empId] = groupedData[empId];
+                return acc;
+            }, {}));
+            console.log("Employee Date Ranges:", employeeDateRanges);
+
+            for (const empId in groupedData) {
+                if (!summary[empId]) {
+                    summary[empId] = {
+                        name: groupedData[empId][Object.keys(groupedData[empId])[0]].name,
+                        lates: 0,
+                        halfDays: 0,
+                        halfDaysFromLates: 0,
+                        halfDaysFromMissing: 0,
+                        halfDaysFromLateArrival: 0,
+                        missingMorningEveningPunches: 0,
+                        missingBreakPunches: 0,
+                        overtime: 0,
+                        totalDeductions: 0,
+                        dailyDetails: []
+                    };
+                }
+
+                const minDate = new Date(employeeDateRanges[empId].minDate);
+                const maxDate = new Date(employeeDateRanges[empId].maxDate);
+                for (let d = new Date(minDate); d <= maxDate; d.setDate(d.getDate() + 1)) {
+                    const dateKey = d.toISOString().split('T')[0];
+                    const date = new Date(dateKey);
+                    const isSunday = date.getDay() === 0;
+
+                    if (!groupedData[empId][dateKey]) {
+                        const dailyDetail = {
+                            date: dateKey,
+                            day: getDayOfWeek(dateKey),
+                            morningPunchIn: isSunday ? 'Holiday' : 'Missing',
+                            breakfastOut: isSunday ? 'Holiday' : 'Missing',
+                            breakfastIn: isSunday ? 'Holiday' : 'Missing',
+                            lunchOut: isSunday ? 'Holiday' : 'Missing',
+                            lunchIn: isSunday ? 'Holiday' : 'Missing',
+                            eveningPunchOut: isSunday ? 'Holiday' : 'Missing',
+                            late: 'No',
+                            halfDay: 'No',
+                            missingMorningEveningCount: isSunday ? 0 : 2,
+                            missingBreakCount: isSunday ? 0 : 4, // Do not count missing break punches for holidays
+                            overtime: 'No'
+                        };
+                        summary[empId].dailyDetails.push(dailyDetail);
+                        if (!isSunday) {
+                            summary[empId].missingMorningEveningPunches += 2;
+                            summary[empId].missingBreakPunches += 4;
+                        }
+                        console.log(`EMP ID ${empId}, Date ${dateKey}: Added missing day${isSunday ? ' (Sunday, no deduction)' : ''}`);
+                    }
+                }
+
+                for (const dateKey in groupedData[empId]) {
+                    const date = new Date(dateKey);
+                    const punches = groupedData[empId][dateKey].punches;
+                    const isSunday = date.getDay() === 0;
+                    const hasPunches = punches.length > 0;
+
+                    punches.sort((a, b) => a.time - b.time);
+
+                    const filteredPunches = [];
+                    let lastPunch = null;
+                    for (const punch of punches) {
+                        if (!lastPunch || (punch.time - lastPunch.time) > duplicateThreshold || punch.state !== lastPunch.state) {
+                            filteredPunches.push(punch);
+                            lastPunch = punch;
+                        } else {
+                            console.log(`EMP ID ${empId}, Date ${dateKey}: Ignoring duplicate punch at ${punch.time.toISOString()} with state ${punch.state}`);
+                        }
+                    }
+
+                    console.log(`EMP ID ${empId}, Date ${dateKey}, All Punches:`, filteredPunches.map(p => `${p.time.toISOString()} ${p.state}`));
+
+                    let morningPunchIn = null, breakfastOut = null, breakfastIn = null, lunchOut = null, lunchIn = null, eveningPunchOut = null;
+                    let inCount = 0, outCount = 0;
+
+                    for (const punch of filteredPunches) {
+                        if (punch.state === 'IN') inCount++;
+                        else if (punch.state === 'OUT') outCount++;
+                    }
+
+                    let breakfastOutAssigned = false, breakfastInAssigned = false, lunchOutAssigned = false, lunchInAssigned = false, eveningPunchAssigned = false;
+
+                    for (const punch of filteredPunches) {
+                        if (punch.state === 'IN') {
+                            inCount++;
+                            if (!morningPunchIn) {
+                                morningPunchIn = punch.time;
+                                console.log(`EMP ID ${empId}, Date ${dateKey}: Assigned morning punch-in at ${formatTime(punch.time)}`);
+                                break;
+                            }
+                        }
+                    }
+
+                    for (const punch of filteredPunches) {
+                        if (punch.state === 'OUT') {
+                            const punchHours = punch.time.getHours();
+                            const punchMinutes = punch.time.getMinutes();
+                            const punchTimeInMinutes = punchHours * 60 + punchMinutes;
+
+                            const eveningHours = eveningPunchThreshold.getHours();
+                            const eveningMinutes = eveningPunchThreshold.getMinutes();
+                            const eveningTimeInMinutes = eveningHours * 60 + eveningMinutes;
+
+                            if (punchTimeInMinutes >= eveningTimeInMinutes && !eveningPunchAssigned) {
+                                eveningPunchOut = punch.time;
+                                eveningPunchAssigned = true;
+                                console.log(`EMP ID ${empId}, Date ${dateKey}: Assigned evening punch-out at ${formatTime(punch.time)}`);
+                            }
+                        }
+                    }
+
+                    if (!eveningPunchAssigned && outCount > 0) {
+                        for (let i = filteredPunches.length - 1; i >= 0; i--) {
+                            if (filteredPunches[i].state === 'OUT') {
+                                eveningPunchOut = filteredPunches[i].time;
+                                eveningPunchAssigned = true;
+                                console.log(`EMP ID ${empId}, Date ${dateKey}: Assigned evening punch-out (last OUT) at ${formatTime(eveningPunchOut)}`);
+                                break;
+                            }
+                        }
+                    }
+
+                    for (const punch of filteredPunches) {
+                        const punchHours = punch.time.getHours();
+                        const punchMinutes = punch.time.getMinutes();
+                        const punchTimeInMinutes = punchHours * 60 + punchMinutes;
+
+                        if (punch.state === 'OUT') {
+                            if (eveningPunchOut && punch.time.getTime() === eveningPunchOut.getTime()) {
+                                continue;
+                            }
+
+                            const breakfastOutStartMinutes = breakfastOutStart.getHours() * 60 + breakfastOutStart.getMinutes();
+                            const breakfastOutEndMinutes = breakfastOutEnd.getHours() * 60 + breakfastOutEnd.getMinutes();
+                            if (punchTimeInMinutes >= breakfastOutStartMinutes && punchTimeInMinutes <= breakfastOutEndMinutes && !breakfastOutAssigned) {
+                                breakfastOut = punch.time;
+                                breakfastOutAssigned = true;
+                                console.log(`EMP ID ${empId}, Date ${dateKey}: Assigned breakfast out at ${formatTime(punch.time)}`);
+                                continue;
+                            }
+
+                            const lunchOutStartMinutes = lunchOutStart.getHours() * 60 + lunchOutStart.getMinutes();
+                            const lunchOutEndMinutes = lunchOutEnd.getHours() * 60 + lunchOutEnd.getMinutes();
+                            if (punchTimeInMinutes >= lunchOutStartMinutes && punchTimeInMinutes <= lunchOutEndMinutes && !lunchOutAssigned) {
+                                lunchOut = punch.time;
+                                lunchOutAssigned = true;
+                                console.log(`EMP ID ${empId}, Date ${dateKey}: Assigned lunch out at ${formatTime(punch.time)}`);
+                                continue;
+                            }
+                        } else if (punch.state === 'IN') {
+                            if (morningPunchIn && punch.time.getTime() === morningPunchIn.getTime()) {
+                                continue;
+                            }
+
+                            const breakfastInStartMinutes = breakfastInStart.getHours() * 60 + breakfastInStart.getMinutes();
+                            const breakfastInEndMinutes = breakfastInEnd.getHours() * 60 + breakfastInEnd.getMinutes();
+                            if (punchTimeInMinutes >= breakfastInStartMinutes && punchTimeInMinutes <= breakfastInEndMinutes && !breakfastInAssigned) {
+                                breakfastIn = punch.time;
+                                breakfastInAssigned = true;
+                                console.log(`EMP ID ${empId}, Date ${dateKey}: Assigned breakfast in at ${formatTime(punch.time)}`);
+                                continue;
+                            }
+
+                            const lunchInStartMinutes = lunchInStart.getHours() * 60 + lunchInStart.getMinutes();
+                            const lunchInEndMinutes = lunchInEnd.getHours() * 60 + lunchInEnd.getMinutes();
+                            if (punchTimeInMinutes >= lunchInStartMinutes && punchTimeInMinutes <= lunchInEndMinutes && !lunchInAssigned) {
+                                lunchIn = punch.time;
+                                lunchInAssigned = true;
+                                console.log(`EMP ID ${empId}, Date ${dateKey}: Assigned lunch in at ${formatTime(punch.time)}`);
+                                continue;
+                            }
+                        }
+                    }
+
+                    console.log(`EMP ID ${empId}, Date ${dateKey}:`, {
+                        inCount,
+                        outCount,
+                        morningPunchIn: morningPunchIn ? morningPunchIn.toISOString() : null,
+                        breakfastOut: breakfastOut ? breakfastOut.toISOString() : null,
+                        breakfastIn: breakfastIn ? breakfastIn.toISOString() : null,
+                        lunchOut: lunchOut ? lunchOut.toISOString() : null,
+                        lunchIn: lunchIn ? lunchIn.toISOString() : null,
+                        eveningPunchOut: eveningPunchOut ? eveningPunchOut.toISOString() : null
+                    });
+
+                    let missingMorningEveningCount = 0;
+                    let missingBreakCount = 0;
+
+                    if (!morningPunchIn || isNaN(morningPunchIn?.getTime())) {
+                        missingMorningEveningCount++;
+                        console.log(`EMP ID ${empId}, Date ${dateKey}: Missing morning punch-in`);
+                    }
+                    if (!eveningPunchOut || isNaN(eveningPunchOut?.getTime())) {
+                        missingMorningEveningCount++;
+                        console.log(`EMP ID ${empId}, Date ${dateKey}: Missing evening punch-out`);
+                    }
+
+                    if (!breakfastOut || isNaN(breakfastOut?.getTime())) {
+                        missingBreakCount++;
+                        console.log(`EMP ID ${empId}, Date ${dateKey}: Missing breakfast out`);
+                    }
+                    if (!breakfastIn || isNaN(breakfastIn?.getTime())) {
+                        missingBreakCount++;
+                        console.log(`EMP ID ${empId}, Date ${dateKey}: Missing breakfast in`);
+                    }
+                    if (!lunchOut || isNaN(lunchOut?.getTime())) {
+                        missingBreakCount++;
+                        console.log(`EMP ID ${empId}, Date ${dateKey}: Missing lunch out`);
+                    }
+                    if (!lunchIn || isNaN(lunchIn?.getTime())) {
+                        missingBreakCount++;
+                        console.log(`EMP ID ${empId}, Date ${dateKey}: Missing lunch in`);
+                    }
+
+                    const dailyDetail = {
+                        date: dateKey,
+                        day: getDayOfWeek(dateKey),
+                        morningPunchIn: morningPunchIn ? formatTime(morningPunchIn) : (isSunday && !hasPunches ? 'Holiday' : 'Missing'),
+                        breakfastOut: breakfastOut ? formatTime(breakfastOut) : (isSunday && !hasPunches ? 'Holiday' : 'Missing'),
+                        breakfastIn: breakfastIn ? formatTime(breakfastIn) : (isSunday && !hasPunches ? 'Holiday' : 'Missing'),
+                        lunchOut: lunchOut ? formatTime(lunchOut) : (isSunday && !hasPunches ? 'Holiday' : 'Missing'),
+                        lunchIn: lunchIn ? formatTime(lunchIn) : (isSunday && !hasPunches ? 'Holiday' : 'Missing'),
+                        eveningPunchOut: eveningPunchOut ? formatTime(eveningPunchOut) : (isSunday && !hasPunches ? 'Holiday' : 'Missing'),
+                        late: 'No',
+                        halfDay: 'No',
+                        missingMorningEveningCount: missingMorningEveningCount,
+                        missingBreakCount: (isSunday && !hasPunches) ? 0 : missingBreakCount, // Do not count missing break punches for holidays
+                        overtime: 'No'
+                    };
+
+                    if (isSunday) {
+                        if (hasPunches) { // Any punch on a Sunday counts as overtime
+                            summary[empId].overtime++;
+                            dailyDetail.overtime = 'Yes';
+                            console.log(`EMP ID ${empId}, Date ${dateKey}: Overtime day detected (Sunday with at least one punch)`);
+                        } else {
+                            dailyDetail.missingMorningEveningCount = 0;
+                            console.log(`EMP ID ${empId}, Date ${dateKey}: Sunday, no punches, not counted as leave`);
+                        }
+                        summary[empId].dailyDetails.push(dailyDetail);
+                        continue;
+                    }
+
+                    if (morningPunchIn && !isNaN(morningPunchIn.getTime())) {
+                        const morningHours = morningPunchIn.getHours();
+                        const morningMinutes = morningPunchIn.getMinutes();
+                        const morningSeconds = morningPunchIn.getSeconds();
+                        const morningTimeInMinutes = morningHours * 60 + morningMinutes + morningSeconds / 60;
+
+                        const lateHours = lateThreshold.getHours();
+                        const lateMinutes = lateThreshold.getMinutes();
+                        const lateSeconds = lateThreshold.getSeconds();
+                        const lateTimeInMinutes = lateHours * 60 + lateMinutes + lateSeconds / 60;
+
+                        const halfDayHours = halfDayThreshold.getHours();
+                        const halfDayMinutes = halfDayThreshold.getMinutes();
+                        const halfDaySeconds = halfDayThreshold.getSeconds();
+                        const halfDayTimeInMinutes = halfDayHours * 60 + halfDayMinutes + halfDaySeconds / 60;
+
+                        if (morningTimeInMinutes > lateTimeInMinutes) {
+                            if (morningTimeInMinutes <= halfDayTimeInMinutes) {
+                                summary[empId].lates++;
+                                dailyDetail.late = `Yes (${formatTime(morningPunchIn)})`;
+                                console.log(`EMP ID ${empId}, Date ${dateKey}: Late arrival at ${morningPunchIn.toISOString()}`);
+                            } else {
+                                summary[empId].halfDays++;
+                                summary[empId].halfDaysFromLateArrival++;
+                                dailyDetail.halfDay = `Yes (Late arrival at ${formatTime(morningPunchIn)})`;
+                                console.log(`EMP ID ${empId}, Date ${dateKey}: Half day for late arrival at ${morningPunchIn.toISOString()}`);
+                            }
+                        }
+                    }
+
+                    summary[empId].missingMorningEveningPunches += missingMorningEveningCount;
+                    summary[empId].missingBreakPunches += dailyDetail.missingBreakCount;
+
+                    if (summary[empId].lates > 0 && summary[empId].lates % 3 === 0) {
+                        const halfDaysFromLates = Math.floor(summary[empId].lates / 3);
+                        summary[empId].halfDays += halfDaysFromLates;
+                        summary[empId].halfDaysFromLates += halfDaysFromLates;
+                        dailyDetail.halfDay = `Yes (${halfDaysFromLates} half days from ${summary[empId].lates} lates)`;
+                        console.log(`EMP ID ${empId}: Added ${halfDaysFromLates} half days from ${summary[empId].lates} lates`);
+                    }
+
+                    if (summary[empId].missingMorningEveningPunches > 0 && summary[empId].missingMorningEveningPunches % 3 === 0) {
+                        const halfDaysFromMissing = Math.floor(summary[empId].missingMorningEveningPunches / 3);
+                        summary[empId].halfDays += halfDaysFromMissing;
+                        summary[empId].halfDaysFromMissing += halfDaysFromMissing;
+                        if (halfDaysFromMissing > 0) {
+                            dailyDetail.halfDay = `Yes (${halfDaysFromMissing} half days from ${summary[empId].missingMorningEveningPunches} missing morning/evening punches)`;
+                        }
+                        console.log(`EMP ID ${empId}: Added ${halfDaysFromMissing} half days from ${summary[empId].missingMorningEveningPunches} missing morning/evening punches`);
+                    }
+
+                    summary[empId].dailyDetails.push(dailyDetail);
+
+                    summary[empId].totalDeductions = summary[empId].halfDays / 2;
+                    console.log(`EMP ID ${empId}: Total Deductions = ${summary[empId].totalDeductions} (from ${summary[empId].halfDays} half days)`);
+                }
+            }
+
+            return summary;
+        }
+
+        function displayResults(summary) {
+            // Determine the date range for the summary heading
+            let dateRangeText = '';
+            if (dateRange.minDate && dateRange.maxDate) {
+                const minDateStr = formatDate(dateRange.minDate);
+                const maxDateStr = formatDate(dateRange.maxDate);
+                dateRangeText = `${minDateStr} to ${maxDateStr}`;
+            }
+
+            let html = `<h3>Attendance Summary ${dateRangeText}</h3>`;
+            html += '<table>';
+            html += '<tr><th>Employee ID</th><th>Employee Name</th><th>Lates</th><th>Half Days</th><th>Missing Morning/Evening Punches</th><th>Overtime Days</th><th>Total Deductions</th></tr>';
+
+            for (const empId in summary) {
+                const emp = summary[empId];
+                let deductionDetails = '';
+                if (emp.totalDeductions > 0) {
+                    const reasons = [];
+                    if (emp.halfDaysFromLateArrival > 0) {
+                        reasons.push(`${emp.halfDaysFromLateArrival} half day${emp.halfDaysFromLateArrival > 1 ? 's' : ''} from late arrival`);
+                    }
+                    if (emp.halfDaysFromLates > 0) {
+                        reasons.push(`${emp.halfDaysFromLates} half day${emp.halfDaysFromLates > 1 ? 's' : ''} from ${emp.lates} lates`);
+                    }
+                    if (emp.halfDaysFromMissing > 0) {
+                        reasons.push(`${emp.halfDaysFromMissing} half day${emp.halfDaysFromMissing > 1 ? 's' : ''} from ${emp.missingMorningEveningPunches} missing punches`);
+                    }
+                    deductionDetails = ` (${reasons.join(', ')})`;
+                }
+                html += `<tr>
+                    <td>${empId}</td>
+                    <td>${emp.name}</td>
+                    <td>${emp.lates}</td>
+                    <td>${emp.halfDays}</td>
+                    <td>${emp.missingMorningEveningPunches}</td>
+                    <td>${emp.overtime}</td>
+                    <td>${emp.totalDeductions.toFixed(1)}${deductionDetails}</td>
+                </tr>`;
+            }
+
+            html += '</table>';
+
+            for (const empId in summary) {
+                const emp = summary[empId];
+                emp.dailyDetails.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+                html += `<h4>Detailed Attendance for ${emp.name} (Employee ID: ${empId})</h4>`;
+                html += '<table>';
+                html += '<tr><th>Date</th><th>Day</th><th>Morning Punch-In</th><th>Breakfast Out</th><th>Breakfast In</th><th>Lunch Out</th><th>Lunch In</th><th>Evening Punch-Out</th><th>Late</th><th>Half Day</th><th>Missing Morning/Evening Punches</th><th>Missing Break Punches</th><th>Overtime</th></tr>';
+
+                emp.dailyDetails.forEach(detail => {
+                    const isSunday = detail.day === 'Sunday';
+                    html += `<tr class="${isSunday ? 'sunday' : ''}">
+                        <td>${formatDate(detail.date)}</td>
+                        <td>${detail.day}</td>
+                        <td>${detail.morningPunchIn}</td>
+                        <td>${detail.breakfastOut}</td>
+                        <td>${detail.breakfastIn}</td>
+                        <td>${detail.lunchOut}</td>
+                        <td>${detail.lunchIn}</td>
+                        <td class="${detail.eveningPunchOut === 'Missing' ? 'no-out' : ''}">${detail.eveningPunchOut}</td>
+                        <td class="${detail.late !== 'No' ? 'late' : ''}">${detail.late}</td>
+                        <td class="${detail.halfDay !== 'No' ? 'leave' : ''}">${detail.halfDay}</td>
+                        <td class="${detail.missingMorningEveningCount > 0 ? 'missing-punches' : ''}">${detail.missingMorningEveningCount}</td>
+                        <td class="${detail.missingBreakCount > 0 ? 'missing-punches' : ''}">${detail.missingBreakCount}</td>
+                        <td class="${detail.overtime === 'Yes' ? 'overtime' : ''}">${detail.overtime}</td>
+                    </tr>`;
+                });
+
+                html += '</table>';
+            }
+
+            document.getElementById('result').innerHTML = html;
+        }
+
+        async function downloadExcel() {
+            if (!globalSummary) {
+                alert("No data to download!");
+                return;
+            }
+
+            const workbook = new ExcelJS.Workbook();
+
+            // Summary Sheet
+            let dateRangeText = '';
+            if (dateRange.minDate && dateRange.maxDate) {
+                const minDateStr = formatDate(dateRange.minDate);
+                const maxDateStr = formatDate(dateRange.maxDate);
+                dateRangeText = `${minDateStr} to ${maxDateStr}`;
+            }
+
+            const summarySheet = workbook.addWorksheet('Summary');
+            summarySheet.addRow([`Attendance Summary ${dateRangeText}`]);
+            summarySheet.addRow(['Employee ID', 'Employee Name', 'Lates', 'Half Days', 'Missing Morning/Evening Punches', 'Overtime Days', 'Total Deductions']);
+
+            // Style the header row
+            summarySheet.getRow(1).font = { bold: true };
+            summarySheet.getRow(2).eachCell(cell => {
+                cell.fill = {
+                    type: 'pattern',
+                    pattern: 'solid',
+                    fgColor: { argb: 'F2F2F2' }
+                };
+                cell.font = { bold: true };
+                cell.border = {
+                    top: { style: 'thin' },
+                    left: { style: 'thin' },
+                    bottom: { style: 'thin' },
+                    right: { style: 'thin' }
+                };
+            });
+
+            for (const empId in globalSummary) {
+                const emp = globalSummary[empId];
+                let deductionDetails = '';
+                if (emp.totalDeductions > 0) {
+                    const reasons = [];
+                    if (emp.halfDaysFromLateArrival > 0) {
+                        reasons.push(`${emp.halfDaysFromLateArrival} half day${emp.halfDaysFromLateArrival > 1 ? 's' : ''} from late arrival`);
+                    }
+                    if (emp.halfDaysFromLates > 0) {
+                        reasons.push(`${emp.halfDaysFromLates} half day${emp.halfDaysFromLates > 1 ? 's' : ''} from ${emp.lates} lates`);
+                    }
+                    if (emp.halfDaysFromMissing > 0) {
+                        reasons.push(`${emp.halfDaysFromMissing} half day${emp.halfDaysFromMissing > 1 ? 's' : ''} from ${emp.missingMorningEveningPunches} missing punches`);
+                    }
+                    deductionDetails = ` (${reasons.join(', ')})`;
+                }
+                const row = summarySheet.addRow([
+                    empId,
+                    emp.name,
+                    emp.lates,
+                    emp.halfDays,
+                    emp.missingMorningEveningPunches,
+                    emp.overtime,
+                    `${emp.totalDeductions.toFixed(1)}${deductionDetails}`
+                ]);
+                row.eachCell(cell => {
+                    cell.border = {
+                        top: { style: 'thin' },
+                        left: { style: 'thin' },
+                        bottom: { style: 'thin' },
+                        right: { style: 'thin' }
+                    };
+                });
+            }
+
+            // Detailed Sheets for Each Employee
+            for (const empId in globalSummary) {
+                const emp = globalSummary[empId];
+                const detailedSheet = workbook.addWorksheet(`Detailed_${emp.name}_${empId}`);
+                detailedSheet.addRow([`Detailed Attendance for ${emp.name} (Employee ID: ${empId})`]);
+                detailedSheet.addRow(['Date', 'Day', 'Morning Punch-In', 'Breakfast Out', 'Breakfast In', 'Lunch Out', 'Lunch In', 'Evening Punch-Out', 'Late', 'Half Day', 'Missing Morning/Evening Punches', 'Missing Break Punches', 'Overtime']);
+
+                // Style the header row
+                detailedSheet.getRow(1).font = { bold: true };
+                detailedSheet.getRow(2).eachCell(cell => {
+                    cell.fill = {
+                        type: 'pattern',
+                        pattern: 'solid',
+                        fgColor: { argb: 'F2F2F2' }
+                    };
+                    cell.font = { bold: true };
+                    cell.border = {
+                        top: { style: 'thin' },
+                        left: { style: 'thin' },
+                        bottom: { style: 'thin' },
+                        right: { style: 'thin' }
+                    };
+                });
+
+                emp.dailyDetails.forEach((detail, index) => {
+                    const isSunday = detail.day === 'Sunday';
+                    const row = detailedSheet.addRow([
+                        formatDate(detail.date),
+                        detail.day,
+                        detail.morningPunchIn,
+                        detail.breakfastOut,
+                        detail.breakfastIn,
+                        detail.lunchOut,
+                        detail.lunchIn,
+                        detail.eveningPunchOut,
+                        detail.late,
+                        detail.halfDay,
+                        detail.missingMorningEveningCount,
+                        detail.missingBreakCount,
+                        detail.overtime
+                    ]);
+
+                    // Apply styles to the row
+                    row.eachCell(cell => {
+                        cell.border = {
+                            top: { style: 'thin' },
+                            left: { style: 'thin' },
+                            bottom: { style: 'thin' },
+                            right: { style: 'thin' }
+                        };
+                        if (isSunday) {
+                            cell.fill = {
+                                type: 'pattern',
+                                pattern: 'solid',
+                                fgColor: { argb: 'E6FFE6' }
+                            };
+                        }
+                    });
+
+                    if (detail.eveningPunchOut === 'Missing') {
+                        row.getCell(8).fill = {
+                            type: 'pattern',
+                            pattern: 'solid',
+                            fgColor: { argb: 'FFCCCB' }
+                        };
+                    }
+                    if (detail.late !== 'No') {
+                        row.getCell(9).fill = {
+                            type: 'pattern',
+                            pattern: 'solid',
+                            fgColor: { argb: 'FFFF00' }
+                        };
+                    }
+                    if (detail.halfDay !== 'No') {
+                        row.getCell(10).fill = {
+                            type: 'pattern',
+                            pattern: 'solid',
+                            fgColor: { argb: 'FF0000' }
+                        };
+                        row.getCell(10).font = { color: { argb: 'FFFFFF' } };
+                    }
+                    if (detail.missingMorningEveningCount > 0) {
+                        row.getCell(11).fill = {
+                            type: 'pattern',
+                            pattern: 'solid',
+                            fgColor: { argb: 'ADD8E6' }
+                        };
+                    }
+                    if (detail.missingBreakCount > 0) {
+                        row.getCell(12).fill = {
+                            type: 'pattern',
+                            pattern: 'solid',
+                            fgColor: { argb: 'ADD8E6' }
+                        };
+                    }
+                    if (detail.overtime === 'Yes') {
+                        row.getCell(13).fill = {
+                            type: 'pattern',
+                            pattern: 'solid',
+                            fgColor: { argb: '90EE90' }
+                        };
+                    }
+                });
+            }
+
+            // Download the file
+            const buffer = await workbook.xlsx.writeBuffer();
+            const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = 'Attendance_Summary.xlsx';
+            link.click();
+        }
+    </script>
+</body>
+</html>
