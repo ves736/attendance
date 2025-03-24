@@ -22,6 +22,9 @@
         .late {
             background-color: yellow;
         }
+        .early-left { /* Changed from .early-leave to .early-left */
+            background-color: yellow; /* Highlight early left in yellow */
+        }
         .no-out {
             background-color: #ffcccb; /* Light red */
         }
@@ -39,59 +42,132 @@
         .sunday {
             background-color: #e6ffe6; /* Light green for Sundays */
         }
+        /* Style for radio buttons */
+        .shift-options {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+        .shift-options label {
+            margin: 2px 0;
+        }
+        /* Set a wider width for the Shift column */
+        .shift-column {
+            width: 150px; /* Increased width for the radio button cell */
+        }
     </style>
 </head>
 <body>
     <h2>Attendance Processor</h2>
     <input type="file" id="excelFile" accept=".xlsx, .xls">
-    <button onclick="processFile()">Process Attendance</button>
+    <br><br>
+    <button id="processBtn">Process Attendance</button>
     <button id="downloadBtn" style="display: none;" onclick="downloadExcel()">Download as Excel</button>
     <div id="result"></div>
 
     <!-- Include SheetJS library -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" onerror="console.error('Failed to load SheetJS library');"></script>
     <!-- Include ExcelJS library for formatting -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js" onerror="console.error('Failed to load ExcelJS library');"></script>
     
     <script>
+        // Log to confirm script is executing
+        console.log("Script loaded and executing");
+
         let globalSummary = null;
-        let dateRange = { minDate: null, maxDate: null }; // To store the date range for the summary heading
+        let dateRange = { minDate: null, maxDate: null };
+        let rawData = null; // Store raw data for reprocessing
+        let employeeShifts = {}; // Store shift selection for each employee (e.g., { "1": "08:00", "2": "09:00" })
 
         function processFile() {
-            const fileInput = document.getElementById('excelFile');
-            const file = fileInput.files[0];
-            const reader = new FileReader();
+            try {
+                console.log("Process Attendance button clicked");
 
-            reader.onload = function(e) {
-                const data = new Uint8Array(e.target.result);
-                const workbook = XLSX.read(data, {type: 'array', cellDates: true, raw: false});
-                const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+                // Show warning message before processing
+                const proceed = confirm("The data is compiled for reference purpose only, cross-check with the original file to make sure on the accuracy.");
+                if (!proceed) {
+                    console.log("User cancelled processing");
+                    return;
+                }
 
-                const rawData = XLSX.utils.sheet_to_json(firstSheet, {header: 1});
-                console.log("Raw Data (first 5 rows):", rawData.slice(0, 5));
+                const fileInput = document.getElementById('excelFile');
+                const file = fileInput.files[0];
+                if (!file) {
+                    alert("Please select a file to process.");
+                    console.log("No file selected");
+                    return;
+                }
 
-                const headers = rawData[1];
-                const dataRows = rawData.slice(2);
+                console.log("File selected:", file.name);
 
-                const jsonData = dataRows.map(row => {
-                    const rowData = {};
-                    headers.forEach((header, index) => {
-                        rowData[header] = row[index];
-                    });
-                    return rowData;
-                });
+                const reader = new FileReader();
 
-                console.log("Column Names:", Object.keys(jsonData[0] || {}));
-                console.log("Sample Data (first 5 rows):", jsonData.slice(0, 5));
+                reader.onload = function(e) {
+                    try {
+                        console.log("File reader onload triggered");
+                        const data = new Uint8Array(e.target.result);
+                        const workbook = XLSX.read(data, {type: 'array', cellDates: true, raw: false});
+                        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
 
-                const attendanceSummary = processAttendance(jsonData);
-                console.log("Final Summary:", attendanceSummary);
+                        const rawDataArray = XLSX.utils.sheet_to_json(firstSheet, {header: 1});
+                        console.log("Raw Data (first 5 rows):", rawDataArray.slice(0, 5));
+
+                        const headers = rawDataArray[1];
+                        const dataRows = rawDataArray.slice(2);
+
+                        rawData = dataRows.map(row => {
+                            const rowData = {};
+                            headers.forEach((header, index) => {
+                                rowData[header] = row[index];
+                            });
+                            return rowData;
+                        });
+
+                        console.log("Column Names:", Object.keys(rawData[0] || {}));
+                        console.log("Sample Data (first 5 rows):", rawData.slice(0, 5));
+
+                        // Initialize shifts to default "08:00 AM" for each employee
+                        const employeeIds = [...new Set(rawData.map(row => row['Employee ID']))];
+                        employeeIds.forEach(empId => {
+                            if (empId && empId !== 'Unknown') {
+                                employeeShifts[empId] = '08:00'; // Default to 08:00 AM
+                            }
+                        });
+
+                        const attendanceSummary = processAttendance(rawData);
+                        console.log("Final Summary:", attendanceSummary);
+                        globalSummary = attendanceSummary;
+                        displayResults(attendanceSummary);
+                        document.getElementById('downloadBtn').style.display = 'inline';
+                    } catch (error) {
+                        console.error("Error in file reader onload:", error);
+                        alert("An error occurred while processing the file. Check the console for details.");
+                    }
+                };
+
+                reader.onerror = function(e) {
+                    console.error("File reader error:", e);
+                    alert("An error occurred while reading the file. Check the console for details.");
+                };
+
+                reader.readAsArrayBuffer(file);
+            } catch (error) {
+                console.error("Error in processFile:", error);
+                alert("An error occurred while processing the file. Check the console for details.");
+            }
+        }
+
+        function reprocessAttendance(empId, shift) {
+            try {
+                console.log(`Reprocessing attendance for Employee ID ${empId} with shift ${shift}`);
+                employeeShifts[empId] = shift;
+                const attendanceSummary = processAttendance(rawData);
                 globalSummary = attendanceSummary;
                 displayResults(attendanceSummary);
-                document.getElementById('downloadBtn').style.display = 'inline';
-            };
-
-            reader.readAsArrayBuffer(file);
+            } catch (error) {
+                console.error("Error in reprocessAttendance:", error);
+                alert("An error occurred while reprocessing attendance. Check the console for details.");
+            }
         }
 
         function formatTime(date) {
@@ -123,10 +199,6 @@
 
         function processAttendance(data) {
             const summary = {};
-            const punchInTime = new Date('2025-01-01 08:00:00');
-            const lateThreshold = new Date('2025-01-01 08:06:00');
-            const halfDayThreshold = new Date('2025-01-01 08:10:00');
-            const eveningPunchThreshold = new Date('2025-01-01 17:55:00');
             const breakfastOutStart = new Date('2025-01-01 09:00:00');
             const breakfastOutEnd = new Date('2025-01-01 10:30:00');
             const breakfastInStart = new Date('2025-01-01 9:15:00');
@@ -135,6 +207,7 @@
             const lunchOutEnd = new Date('2025-01-01 14:00:00');
             const lunchInStart = new Date('2025-01-01 13:00:00');
             const lunchInEnd = new Date('2025-01-01 14:30:00');
+            const eveningPunchThreshold = new Date('2025-01-01 17:55:00'); // Changed from 17:00 to 17:55 (05:55 PM)
             const duplicateThreshold = 5 * 60 * 1000;
 
             const groupedData = {};
@@ -240,6 +313,7 @@
                 return acc;
             }, {}));
             console.log("Employee Date Ranges:", employeeDateRanges);
+            console.log("Global Date Range:", { minDate: dateRange.minDate, maxDate: dateRange.maxDate });
 
             for (const empId in groupedData) {
                 if (!summary[empId]) {
@@ -247,53 +321,74 @@
                         name: groupedData[empId][Object.keys(groupedData[empId])[0]].name,
                         lates: 0,
                         halfDays: 0,
-                        halfDaysFromLates: 0,
-                        halfDaysFromMissing: 0,
                         halfDaysFromLateArrival: 0,
-                        missingMorningEveningPunches: 0,
-                        missingBreakPunches: 0,
+                        halfDaysFromMissingMorning: 0,
+                        halfDaysFromMissingEvening: 0,
+                        missingMorningPunches: 0,
+                        missingEveningPunches: 0,
+                        earlyLeftCount: 0, // Changed from earlyLeaves to earlyLeftCount
+                        fullDayLeaves: 0,
                         overtime: 0,
                         totalDeductions: 0,
                         dailyDetails: []
                     };
                 }
 
-                const minDate = new Date(employeeDateRanges[empId].minDate);
-                const maxDate = new Date(employeeDateRanges[empId].maxDate);
+                // Use global date range to ensure all dates are processed
+                const minDate = new Date(dateRange.minDate);
+                const maxDate = new Date(dateRange.maxDate);
                 for (let d = new Date(minDate); d <= maxDate; d.setDate(d.getDate() + 1)) {
                     const dateKey = d.toISOString().split('T')[0];
                     const date = new Date(dateKey);
                     const isSunday = date.getDay() === 0;
 
+                    // Debug for Rakesh on March 11, 2025
+                    if (empId == 6 && dateKey === '2025-03-11') {
+                        console.log(`EMP ID ${empId}, Date ${dateKey}: Processing date for Rakesh`);
+                    }
+
                     if (!groupedData[empId][dateKey]) {
                         const dailyDetail = {
                             date: dateKey,
                             day: getDayOfWeek(dateKey),
-                            morningPunchIn: isSunday ? 'Holiday' : 'Missing',
-                            breakfastOut: isSunday ? 'Holiday' : 'Missing',
-                            breakfastIn: isSunday ? 'Holiday' : 'Missing',
-                            lunchOut: isSunday ? 'Holiday' : 'Missing',
-                            lunchIn: isSunday ? 'Holiday' : 'Missing',
-                            eveningPunchOut: isSunday ? 'Holiday' : 'Missing',
+                            morningPunchIn: isSunday ? 'Holiday' : 'Leave',
+                            breakfastOut: isSunday ? 'Holiday' : 'Leave',
+                            breakfastIn: isSunday ? 'Holiday' : 'Leave',
+                            lunchOut: isSunday ? 'Holiday' : 'Leave',
+                            lunchIn: isSunday ? 'Holiday' : 'Leave',
+                            eveningPunchOut: isSunday ? 'Holiday' : 'Leave',
                             late: 'No',
                             halfDay: 'No',
-                            missingMorningEveningCount: isSunday ? 0 : 2,
-                            missingBreakCount: isSunday ? 0 : 4, // Do not count missing break punches for holidays
+                            missingMorningCount: 0, // Do not count missing punches for full-day leave
+                            missingEveningCount: 0,
+                            missingBreakCount: 0,
+                            earlyLeft: 'No', // Changed from earlyLeave to earlyLeft
                             overtime: 'No'
                         };
                         summary[empId].dailyDetails.push(dailyDetail);
                         if (!isSunday) {
-                            summary[empId].missingMorningEveningPunches += 2;
-                            summary[empId].missingBreakPunches += 4;
+                            summary[empId].fullDayLeaves += 1; // Full day leave on working day with no punches
+                            // Debug for Rakesh on March 11, 2025
+                            if (empId == 6 && dateKey === '2025-03-11') {
+                                console.log(`EMP ID ${empId}, Date ${dateKey}: Rakesh - Marked as full day leave (no punches on a working day)`);
+                            }
+                            // Debug for Ajeesh
+                            if (empId == 1) { // Replace 1 with Ajeesh's actual Employee ID
+                                console.log(`EMP ID ${empId} (Ajeesh), Date ${dateKey}: Incremented fullDayLeaves to ${summary[empId].fullDayLeaves}`);
+                            }
                         }
-                        console.log(`EMP ID ${empId}, Date ${dateKey}: Added missing day${isSunday ? ' (Sunday, no deduction)' : ''}`);
+                        console.log(`EMP ID ${empId}, Date ${dateKey}: Added missing day${isSunday ? ' (Sunday, no deduction)' : ' (Full day leave)'}`);
+                        continue; // Skip to next date since there are no punches
                     }
-                }
 
-                for (const dateKey in groupedData[empId]) {
-                    const date = new Date(dateKey);
-                    const punches = groupedData[empId][dateKey].punches;
-                    const isSunday = date.getDay() === 0;
+                    // Adjust thresholds based on employee's shift
+                    const shiftTime = employeeShifts[empId] || '08:00';
+                    const punchInTime = new Date(`2025-01-01 ${shiftTime}:00`);
+                    const lateThreshold = new Date(`2025-01-01 ${shiftTime === '08:00' ? '08:05:00' : '09:10:00'}`); // Adjusted for Vysakh
+                    const halfDayThreshold = new Date(`2025-01-01 ${shiftTime === '08:00' ? '08:10:00' : '09:10:00'}`);
+
+                    const dateKeyData = groupedData[empId][dateKey];
+                    const punches = dateKeyData.punches;
                     const hasPunches = punches.length > 0;
 
                     punches.sort((a, b) => a.time - b.time);
@@ -323,13 +418,17 @@
 
                     for (const punch of filteredPunches) {
                         if (punch.state === 'IN') {
-                            inCount++;
                             if (!morningPunchIn) {
                                 morningPunchIn = punch.time;
                                 console.log(`EMP ID ${empId}, Date ${dateKey}: Assigned morning punch-in at ${formatTime(punch.time)}`);
                                 break;
                             }
                         }
+                    }
+
+                    // After the loop, log if morningPunchIn was not assigned
+                    if (!morningPunchIn) {
+                        console.log(`EMP ID ${empId}, Date ${dateKey}: No morning punch-in found. All punches:`, filteredPunches.map(p => `${p.time.toISOString()} (${p.state})`));
                     }
 
                     for (const punch of filteredPunches) {
@@ -424,16 +523,47 @@
                         eveningPunchOut: eveningPunchOut ? eveningPunchOut.toISOString() : null
                     });
 
-                    let missingMorningEveningCount = 0;
-                    let missingBreakCount = 0;
+                    let missingMorningCount = 0, missingEveningCount = 0, missingBreakCount = 0, earlyLeft = 'No'; // Changed from earlyLeave to earlyLeft
+
+                    // Check if there are any IN punches on this day
+                    let hasInPunch = false;
+                    for (const punch of filteredPunches) {
+                        if (punch.state === 'IN') {
+                            hasInPunch = true;
+                            break;
+                        }
+                    }
 
                     if (!morningPunchIn || isNaN(morningPunchIn?.getTime())) {
-                        missingMorningEveningCount++;
-                        console.log(`EMP ID ${empId}, Date ${dateKey}: Missing morning punch-in`);
+                        if (hasInPunch) {
+                            missingMorningCount++;
+                            summary[empId].missingMorningPunches++;
+                            console.log(`EMP ID ${empId}, Date ${dateKey}: Missing morning punch-in (has other IN punches)`);
+                        } else {
+                            console.log(`EMP ID ${empId}, Date ${dateKey}: No IN punches on this day, not counting as missing morning punch`);
+                        }
                     }
                     if (!eveningPunchOut || isNaN(eveningPunchOut?.getTime())) {
-                        missingMorningEveningCount++;
+                        missingEveningCount++;
+                        summary[empId].missingEveningPunches++;
                         console.log(`EMP ID ${empId}, Date ${dateKey}: Missing evening punch-out`);
+                        // Specific case: Rakesh on Feb 22
+                        if (empId == 6 && dateKey === '2025-02-22') {
+                            console.log(`EMP ID ${empId}, Date ${dateKey}: Rakesh on Feb 22 - Missing Punch Out`);
+                        }
+                    } else {
+                        // Check for early left (changed from early leave)
+                        const eveningHours = eveningPunchOut.getHours();
+                        const eveningMinutes = eveningPunchOut.getMinutes();
+                        const eveningTimeInMinutes = eveningHours * 60 + eveningMinutes;
+                        const thresholdHours = eveningPunchThreshold.getHours();
+                        const thresholdMinutes = eveningPunchThreshold.getMinutes();
+                        const thresholdTimeInMinutes = thresholdHours * 60 + thresholdMinutes;
+                        if (eveningTimeInMinutes < thresholdTimeInMinutes) {
+                            earlyLeft = `Yes (${formatTime(eveningPunchOut)})`;
+                            summary[empId].earlyLeftCount++; // Changed from earlyLeaves to earlyLeftCount
+                            console.log(`EMP ID ${empId}, Date ${dateKey}: Early left at ${formatTime(eveningPunchOut)}`);
+                        }
                     }
 
                     if (!breakfastOut || isNaN(breakfastOut?.getTime())) {
@@ -464,18 +594,21 @@
                         eveningPunchOut: eveningPunchOut ? formatTime(eveningPunchOut) : (isSunday && !hasPunches ? 'Holiday' : 'Missing'),
                         late: 'No',
                         halfDay: 'No',
-                        missingMorningEveningCount: missingMorningEveningCount,
-                        missingBreakCount: (isSunday && !hasPunches) ? 0 : missingBreakCount, // Do not count missing break punches for holidays
+                        missingMorningCount: missingMorningCount,
+                        missingEveningCount: missingEveningCount,
+                        missingBreakCount: (isSunday && !hasPunches) ? 0 : missingBreakCount,
+                        earlyLeft: earlyLeft, // Changed from earlyLeave to earlyLeft
                         overtime: 'No'
                     };
 
                     if (isSunday) {
-                        if (hasPunches) { // Any punch on a Sunday counts as overtime
+                        if (hasPunches) {
                             summary[empId].overtime++;
                             dailyDetail.overtime = 'Yes';
                             console.log(`EMP ID ${empId}, Date ${dateKey}: Overtime day detected (Sunday with at least one punch)`);
                         } else {
-                            dailyDetail.missingMorningEveningCount = 0;
+                            dailyDetail.missingMorningCount = 0;
+                            dailyDetail.missingEveningCount = 0;
                             console.log(`EMP ID ${empId}, Date ${dateKey}: Sunday, no punches, not counted as leave`);
                         }
                         summary[empId].dailyDetails.push(dailyDetail);
@@ -503,6 +636,10 @@
                                 summary[empId].lates++;
                                 dailyDetail.late = `Yes (${formatTime(morningPunchIn)})`;
                                 console.log(`EMP ID ${empId}, Date ${dateKey}: Late arrival at ${morningPunchIn.toISOString()}`);
+                                // Specific case: Vysakh on Feb 21
+                                if (empId == 10 && dateKey === '2025-02-21' && morningPunchIn.getHours() === 8 && morningPunchIn.getMinutes() === 6) {
+                                    console.log(`EMP ID ${empId}, Date ${dateKey}: Vysakh on Feb 21 - Marked as late at 08:06`);
+                                }
                             } else {
                                 summary[empId].halfDays++;
                                 summary[empId].halfDaysFromLateArrival++;
@@ -512,31 +649,37 @@
                         }
                     }
 
-                    summary[empId].missingMorningEveningPunches += missingMorningEveningCount;
-                    summary[empId].missingBreakPunches += dailyDetail.missingBreakCount;
-
-                    if (summary[empId].lates > 0 && summary[empId].lates % 3 === 0) {
-                        const halfDaysFromLates = Math.floor(summary[empId].lates / 3);
-                        summary[empId].halfDays += halfDaysFromLates;
-                        summary[empId].halfDaysFromLates += halfDaysFromLates;
-                        dailyDetail.halfDay = `Yes (${halfDaysFromLates} half days from ${summary[empId].lates} lates)`;
-                        console.log(`EMP ID ${empId}: Added ${halfDaysFromLates} half days from ${summary[empId].lates} lates`);
+                    // Calculate deductions from missing punches
+                    if (summary[empId].missingMorningPunches > 0) {
+                        summary[empId].halfDaysFromMissingMorning += summary[empId].missingMorningPunches;
+                        summary[empId].halfDays += summary[empId].missingMorningPunches;
                     }
-
-                    if (summary[empId].missingMorningEveningPunches > 0 && summary[empId].missingMorningEveningPunches % 3 === 0) {
-                        const halfDaysFromMissing = Math.floor(summary[empId].missingMorningEveningPunches / 3);
-                        summary[empId].halfDays += halfDaysFromMissing;
-                        summary[empId].halfDaysFromMissing += halfDaysFromMissing;
-                        if (halfDaysFromMissing > 0) {
-                            dailyDetail.halfDay = `Yes (${halfDaysFromMissing} half days from ${summary[empId].missingMorningEveningPunches} missing morning/evening punches)`;
+                    if (summary[empId].missingEveningPunches > 0 && summary[empId].missingEveningPunches % 3 === 0) {
+                        const halfDaysFromMissingEvening = Math.floor(summary[empId].missingEveningPunches / 3);
+                        summary[empId].halfDaysFromMissingEvening += halfDaysFromMissingEvening;
+                        summary[empId].halfDays += halfDaysFromMissingEvening;
+                        if (halfDaysFromMissingEvening > 0) {
+                            dailyDetail.halfDay = `Yes (${halfDaysFromMissingEvening} half days from ${summary[empId].missingEveningPunches} missing evening punches)`;
                         }
-                        console.log(`EMP ID ${empId}: Added ${halfDaysFromMissing} half days from ${summary[empId].missingMorningEveningPunches} missing morning/evening punches`);
                     }
 
                     summary[empId].dailyDetails.push(dailyDetail);
+                }
 
-                    summary[empId].totalDeductions = summary[empId].halfDays / 2;
-                    console.log(`EMP ID ${empId}: Total Deductions = ${summary[empId].totalDeductions} (from ${summary[empId].halfDays} half days)`);
+                // Calculate total deductions after processing all days
+                summary[empId].totalDeductions = (summary[empId].halfDaysFromLateArrival * 0.5) +
+                                                 (summary[empId].halfDaysFromMissingMorning * 0.5) +
+                                                 (Math.floor(summary[empId].missingEveningPunches / 3) * 0.5) +
+                                                 summary[empId].fullDayLeaves;
+                if (empId == 1) { // Replace 1 with Ajeesh's actual Employee ID
+                    console.log(`EMP ID ${empId} (Ajeesh): Final Total Deductions Breakdown:`);
+                    console.log(`- Half Days from Late Arrival: ${summary[empId].halfDaysFromLateArrival} * 0.5 = ${summary[empId].halfDaysFromLateArrival * 0.5}`);
+                    console.log(`- Half Days from Missing Morning: ${summary[empId].halfDaysFromMissingMorning} * 0.5 = ${summary[empId].halfDaysFromMissingMorning * 0.5}`);
+                    console.log(`- Half Days from Missing Evening: ${Math.floor(summary[empId].missingEveningPunches / 3)} * 0.5 = ${Math.floor(summary[empId].missingEveningPunches / 3) * 0.5}`);
+                    console.log(`- Full Day Leaves: ${summary[empId].fullDayLeaves}`);
+                    console.log(`Total Deductions: ${summary[empId].totalDeductions}`);
+                } else {
+                    console.log(`EMP ID ${empId}: Final Total Deductions = ${summary[empId].totalDeductions}, Full Day Leaves = ${summary[empId].fullDayLeaves}`);
                 }
             }
 
@@ -544,7 +687,6 @@
         }
 
         function displayResults(summary) {
-            // Determine the date range for the summary heading
             let dateRangeText = '';
             if (dateRange.minDate && dateRange.maxDate) {
                 const minDateStr = formatDate(dateRange.minDate);
@@ -554,30 +696,45 @@
 
             let html = `<h3>Attendance Summary ${dateRangeText}</h3>`;
             html += '<table>';
-            html += '<tr><th>Employee ID</th><th>Employee Name</th><th>Lates</th><th>Half Days</th><th>Missing Morning/Evening Punches</th><th>Overtime Days</th><th>Total Deductions</th></tr>';
+            html += '<tr><th>Employee ID</th><th>Employee Name</th><th class="shift-column">Shift</th><th>Lates</th><th>Half Days (Late Arrival)</th><th>Missing Morning Punches</th><th>Missing Evening Punches</th><th>Early Left</th><th>Full Day Leaves</th><th>Overtime Days</th><th>Total Deductions</th></tr>'; // Changed Early Leaves to Early Left
 
             for (const empId in summary) {
                 const emp = summary[empId];
                 let deductionDetails = '';
-                if (emp.totalDeductions > 0) {
+                if (emp.totalDeductions > 0 || emp.earlyLeftCount > 0) { // Changed from earlyLeaves to earlyLeftCount
                     const reasons = [];
                     if (emp.halfDaysFromLateArrival > 0) {
                         reasons.push(`${emp.halfDaysFromLateArrival} half day${emp.halfDaysFromLateArrival > 1 ? 's' : ''} from late arrival`);
                     }
-                    if (emp.halfDaysFromLates > 0) {
-                        reasons.push(`${emp.halfDaysFromLates} half day${emp.halfDaysFromLates > 1 ? 's' : ''} from ${emp.lates} lates`);
+                    if (emp.halfDaysFromMissingMorning > 0) {
+                        reasons.push(`${emp.halfDaysFromMissingMorning} half day${emp.halfDaysFromMissingMorning > 1 ? 's' : ''} from missing morning punches`);
                     }
-                    if (emp.halfDaysFromMissing > 0) {
-                        reasons.push(`${emp.halfDaysFromMissing} half day${emp.halfDaysFromMissing > 1 ? 's' : ''} from ${emp.missingMorningEveningPunches} missing punches`);
+                    if (emp.halfDaysFromMissingEvening > 0) {
+                        reasons.push(`${emp.halfDaysFromMissingEvening} half day${emp.halfDaysFromMissingEvening > 1 ? 's' : ''} from ${emp.missingEveningPunches} missing evening punches`);
+                    }
+                    if (emp.fullDayLeaves > 0) {
+                        reasons.push(`${emp.fullDayLeaves} full day leave${emp.fullDayLeaves > 1 ? 's' : ''}`);
+                    }
+                    if (emp.earlyLeftCount > 0) { // Changed from earlyLeaves to earlyLeftCount
+                        reasons.push(`${emp.earlyLeftCount} early left${emp.earlyLeftCount > 1 ? 's' : ''}`); // Changed to early left
                     }
                     deductionDetails = ` (${reasons.join(', ')})`;
                 }
                 html += `<tr>
                     <td>${empId}</td>
                     <td>${emp.name}</td>
+                    <td class="shift-column">
+                        <div class="shift-options">
+                            <label><input type="radio" name="shift_${empId}" value="08:00" ${employeeShifts[empId] === '08:00' ? 'checked' : ''} onchange="reprocessAttendance(${empId}, '08:00')"> 08:00 AM</label>
+                            <label><input type="radio" name="shift_${empId}" value="09:00" ${employeeShifts[empId] === '09:00' ? 'checked' : ''} onchange="reprocessAttendance(${empId}, '09:00')"> 09:00 AM</label>
+                        </div>
+                    </td>
                     <td>${emp.lates}</td>
-                    <td>${emp.halfDays}</td>
-                    <td>${emp.missingMorningEveningPunches}</td>
+                    <td>${emp.halfDaysFromLateArrival}</td>
+                    <td>${emp.missingMorningPunches}</td>
+                    <td>${emp.missingEveningPunches}</td>
+                    <td>${emp.earlyLeftCount}</td> <!-- Changed from earlyLeaves to earlyLeftCount -->
+                    <td>${emp.fullDayLeaves}</td>
                     <td>${emp.overtime}</td>
                     <td>${emp.totalDeductions.toFixed(1)}${deductionDetails}</td>
                 </tr>`;
@@ -591,23 +748,25 @@
 
                 html += `<h4>Detailed Attendance for ${emp.name} (Employee ID: ${empId})</h4>`;
                 html += '<table>';
-                html += '<tr><th>Date</th><th>Day</th><th>Morning Punch-In</th><th>Breakfast Out</th><th>Breakfast In</th><th>Lunch Out</th><th>Lunch In</th><th>Evening Punch-Out</th><th>Late</th><th>Half Day</th><th>Missing Morning/Evening Punches</th><th>Missing Break Punches</th><th>Overtime</th></tr>';
+                html += '<tr><th>Date</th><th>Day</th><th>Morning Punch-In</th><th>Breakfast Out</th><th>Breakfast In</th><th>Lunch Out</th><th>Lunch In</th><th>Evening Punch-Out</th><th>Late</th><th>Half Day</th><th>Missing Morning Punches</th><th>Missing Evening Punches</th><th>Early Left</th><th>Overtime</th></tr>'; // Changed Early Leave to Early Left
 
                 emp.dailyDetails.forEach(detail => {
                     const isSunday = detail.day === 'Sunday';
+                    const isFullDayLeave = detail.morningPunchIn === 'Leave';
                     html += `<tr class="${isSunday ? 'sunday' : ''}">
                         <td>${formatDate(detail.date)}</td>
                         <td>${detail.day}</td>
-                        <td>${detail.morningPunchIn}</td>
-                        <td>${detail.breakfastOut}</td>
-                        <td>${detail.breakfastIn}</td>
-                        <td>${detail.lunchOut}</td>
-                        <td>${detail.lunchIn}</td>
-                        <td class="${detail.eveningPunchOut === 'Missing' ? 'no-out' : ''}">${detail.eveningPunchOut}</td>
+                        <td class="${isFullDayLeave ? 'leave' : ''}">${detail.morningPunchIn}</td>
+                        <td class="${isFullDayLeave ? 'leave' : ''}">${detail.breakfastOut}</td>
+                        <td class="${isFullDayLeave ? 'leave' : ''}">${detail.breakfastIn}</td>
+                        <td class="${isFullDayLeave ? 'leave' : ''}">${detail.lunchOut}</td>
+                        <td class="${isFullDayLeave ? 'leave' : ''}">${detail.lunchIn}</td>
+                        <td class="${isFullDayLeave ? 'leave' : detail.eveningPunchOut === 'Missing' ? 'no-out' : detail.earlyLeft !== 'No' ? 'early-left' : ''}">${detail.eveningPunchOut}</td> <!-- Changed earlyLeave to earlyLeft and class to early-left -->
                         <td class="${detail.late !== 'No' ? 'late' : ''}">${detail.late}</td>
                         <td class="${detail.halfDay !== 'No' ? 'leave' : ''}">${detail.halfDay}</td>
-                        <td class="${detail.missingMorningEveningCount > 0 ? 'missing-punches' : ''}">${detail.missingMorningEveningCount}</td>
-                        <td class="${detail.missingBreakCount > 0 ? 'missing-punches' : ''}">${detail.missingBreakCount}</td>
+                        <td class="${detail.missingMorningCount > 0 ? 'missing-punches' : ''}">${detail.missingMorningCount}</td>
+                        <td class="${detail.missingEveningCount > 0 ? 'missing-punches' : ''}">${detail.missingEveningCount}</td>
+                        <td>${detail.earlyLeft}</td> <!-- Changed from earlyLeave to earlyLeft -->
                         <td class="${detail.overtime === 'Yes' ? 'overtime' : ''}">${detail.overtime}</td>
                     </tr>`;
                 });
@@ -636,7 +795,7 @@
 
             const summarySheet = workbook.addWorksheet('Summary');
             summarySheet.addRow([`Attendance Summary ${dateRangeText}`]);
-            summarySheet.addRow(['Employee ID', 'Employee Name', 'Lates', 'Half Days', 'Missing Morning/Evening Punches', 'Overtime Days', 'Total Deductions']);
+            summarySheet.addRow(['Employee ID', 'Employee Name', 'Shift', 'Lates', 'Half Days (Late Arrival)', 'Missing Morning Punches', 'Missing Evening Punches', 'Early Left', 'Full Day Leaves', 'Overtime Days', 'Total Deductions']); // Changed Early Leaves to Early Left
 
             // Style the header row
             summarySheet.getRow(1).font = { bold: true };
@@ -658,25 +817,35 @@
             for (const empId in globalSummary) {
                 const emp = globalSummary[empId];
                 let deductionDetails = '';
-                if (emp.totalDeductions > 0) {
+                if (emp.totalDeductions > 0 || emp.earlyLeftCount > 0) { // Changed from earlyLeaves to earlyLeftCount
                     const reasons = [];
                     if (emp.halfDaysFromLateArrival > 0) {
                         reasons.push(`${emp.halfDaysFromLateArrival} half day${emp.halfDaysFromLateArrival > 1 ? 's' : ''} from late arrival`);
                     }
-                    if (emp.halfDaysFromLates > 0) {
-                        reasons.push(`${emp.halfDaysFromLates} half day${emp.halfDaysFromLates > 1 ? 's' : ''} from ${emp.lates} lates`);
+                    if (emp.halfDaysFromMissingMorning > 0) {
+                        reasons.push(`${emp.halfDaysFromMissingMorning} half day${emp.halfDaysFromMissingMorning > 1 ? 's' : ''} from missing morning punches`);
                     }
-                    if (emp.halfDaysFromMissing > 0) {
-                        reasons.push(`${emp.halfDaysFromMissing} half day${emp.halfDaysFromMissing > 1 ? 's' : ''} from ${emp.missingMorningEveningPunches} missing punches`);
+                    if (emp.halfDaysFromMissingEvening > 0) {
+                        reasons.push(`${emp.halfDaysFromMissingEvening} half day${emp.halfDaysFromMissingEvening > 1 ? 's' : ''} from ${emp.missingEveningPunches} missing evening punches`);
+                    }
+                    if (emp.fullDayLeaves > 0) {
+                        reasons.push(`${emp.fullDayLeaves} full day leave${emp.fullDayLeaves > 1 ? 's' : ''}`);
+                    }
+                    if (emp.earlyLeftCount > 0) { // Changed from earlyLeaves to earlyLeftCount
+                        reasons.push(`${emp.earlyLeftCount} early left${emp.earlyLeftCount > 1 ? 's' : ''}`); // Changed to early left
                     }
                     deductionDetails = ` (${reasons.join(', ')})`;
                 }
                 const row = summarySheet.addRow([
                     empId,
                     emp.name,
+                    employeeShifts[empId] + ' AM', // Include the selected shift
                     emp.lates,
-                    emp.halfDays,
-                    emp.missingMorningEveningPunches,
+                    emp.halfDaysFromLateArrival,
+                    emp.missingMorningPunches,
+                    emp.missingEveningPunches,
+                    emp.earlyLeftCount, // Changed from earlyLeaves to earlyLeftCount
+                    emp.fullDayLeaves,
                     emp.overtime,
                     `${emp.totalDeductions.toFixed(1)}${deductionDetails}`
                 ]);
@@ -695,7 +864,7 @@
                 const emp = globalSummary[empId];
                 const detailedSheet = workbook.addWorksheet(`Detailed_${emp.name}_${empId}`);
                 detailedSheet.addRow([`Detailed Attendance for ${emp.name} (Employee ID: ${empId})`]);
-                detailedSheet.addRow(['Date', 'Day', 'Morning Punch-In', 'Breakfast Out', 'Breakfast In', 'Lunch Out', 'Lunch In', 'Evening Punch-Out', 'Late', 'Half Day', 'Missing Morning/Evening Punches', 'Missing Break Punches', 'Overtime']);
+                detailedSheet.addRow(['Date', 'Day', 'Morning Punch-In', 'Breakfast Out', 'Breakfast In', 'Lunch Out', 'Lunch In', 'Evening Punch-Out', 'Late', 'Half Day', 'Missing Morning Punches', 'Missing Evening Punches', 'Early Left', 'Overtime']); // Changed Early Leave to Early Left
 
                 // Style the header row
                 detailedSheet.getRow(1).font = { bold: true };
@@ -716,6 +885,7 @@
 
                 emp.dailyDetails.forEach((detail, index) => {
                     const isSunday = detail.day === 'Sunday';
+                    const isFullDayLeave = detail.morningPunchIn === 'Leave';
                     const row = detailedSheet.addRow([
                         formatDate(detail.date),
                         detail.day,
@@ -727,8 +897,9 @@
                         detail.eveningPunchOut,
                         detail.late,
                         detail.halfDay,
-                        detail.missingMorningEveningCount,
-                        detail.missingBreakCount,
+                        detail.missingMorningCount,
+                        detail.missingEveningCount,
+                        detail.earlyLeft, // Changed from earlyLeave to earlyLeft
                         detail.overtime
                     ]);
 
@@ -749,12 +920,30 @@
                         }
                     });
 
-                    if (detail.eveningPunchOut === 'Missing') {
-                        row.getCell(8).fill = {
-                            type: 'pattern',
-                            pattern: 'solid',
-                            fgColor: { argb: 'FFCCCB' }
-                        };
+                    // Apply "Leave" styling to punch-related cells for full-day leaves
+                    if (isFullDayLeave) {
+                        for (let i = 3; i <= 8; i++) { // Columns 3 to 8 are morningPunchIn to eveningPunchOut
+                            row.getCell(i).fill = {
+                                type: 'pattern',
+                                pattern: 'solid',
+                                fgColor: { argb: 'FF0000' }
+                            };
+                            row.getCell(i).font = { color: { argb: 'FFFFFF' } };
+                        }
+                    } else {
+                        if (detail.eveningPunchOut === 'Missing') {
+                            row.getCell(8).fill = {
+                                type: 'pattern',
+                                pattern: 'solid',
+                                fgColor: { argb: 'FFCCCB' }
+                            };
+                        } else if (detail.earlyLeft !== 'No') { // Changed from earlyLeave to earlyLeft
+                            row.getCell(8).fill = {
+                                type: 'pattern',
+                                pattern: 'solid',
+                                fgColor: { argb: 'FFFF00' }
+                            };
+                        }
                     }
                     if (detail.late !== 'No') {
                         row.getCell(9).fill = {
@@ -771,22 +960,29 @@
                         };
                         row.getCell(10).font = { color: { argb: 'FFFFFF' } };
                     }
-                    if (detail.missingMorningEveningCount > 0) {
+                    if (detail.missingMorningCount > 0) {
                         row.getCell(11).fill = {
                             type: 'pattern',
                             pattern: 'solid',
                             fgColor: { argb: 'ADD8E6' }
                         };
                     }
-                    if (detail.missingBreakCount > 0) {
+                    if (detail.missingEveningCount > 0) {
                         row.getCell(12).fill = {
                             type: 'pattern',
                             pattern: 'solid',
                             fgColor: { argb: 'ADD8E6' }
                         };
                     }
-                    if (detail.overtime === 'Yes') {
+                    if (detail.earlyLeft !== 'No') { // Changed from earlyLeave to earlyLeft
                         row.getCell(13).fill = {
+                            type: 'pattern',
+                            pattern: 'solid',
+                            fgColor: { argb: 'FFFF00' }
+                        };
+                    }
+                    if (detail.overtime === 'Yes') {
+                        row.getCell(14).fill = {
                             type: 'pattern',
                             pattern: 'solid',
                             fgColor: { argb: '90EE90' }
@@ -803,6 +999,18 @@
             link.download = 'Attendance_Summary.xlsx';
             link.click();
         }
+
+        // Attach the event listener programmatically
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log("DOM fully loaded, attaching event listener");
+            const processBtn = document.getElementById('processBtn');
+            if (processBtn) {
+                processBtn.addEventListener('click', processFile);
+                console.log("Event listener attached to processBtn");
+            } else {
+                console.error("Process button not found!");
+            }
+        });
     </script>
 </body>
 </html>
